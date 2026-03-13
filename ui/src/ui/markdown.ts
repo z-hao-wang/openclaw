@@ -58,11 +58,37 @@ const sanitizeOptions = {
 let hooksInstalled = false;
 const MARKDOWN_CHAR_LIMIT = 140_000;
 const MARKDOWN_PARSE_LIMIT = 40_000;
+
 const MARKDOWN_CACHE_LIMIT = 200;
 const MARKDOWN_CACHE_MAX_CHARS = 50_000;
+/**
+ * Maximum single-line length before we skip markdown parsing.
+ * Long lines with many special characters (e.g. minified/malformed JSON)
+ * can trigger catastrophic regex backtracking in marked's inline patterns (#36213).
+ */
+const MAX_LINE_LENGTH_FOR_MARKDOWN = 2000;
 const INLINE_DATA_IMAGE_RE = /^data:image\/[a-z0-9.+-]+;base64,/i;
 const markdownCache = new Map<string, string>();
 const TAIL_LINK_BLUR_CLASS = "chat-link-tail-blur";
+
+/**
+ * Detect text with pathologically long lines that can cause marked.parse()
+ * to hang due to catastrophic regex backtracking on inline patterns.
+ * Markdown is human-readable text and rarely has lines > 2000 chars;
+ * data blobs (JSON, logs, encoded payloads) commonly do.
+ */
+function hasPathologicalLines(text: string): boolean {
+  let lineStart = 0;
+  for (let i = 0; i <= text.length; i++) {
+    if (i === text.length || text[i] === "\n") {
+      if (i - lineStart > MAX_LINE_LENGTH_FOR_MARKDOWN) {
+        return true;
+      }
+      lineStart = i + 1;
+    }
+  }
+  return false;
+}
 
 function getCachedMarkdown(key: string): string | null {
   const cached = markdownCache.get(key);
@@ -123,7 +149,11 @@ export function toSanitizedMarkdownHtml(markdown: string): string {
   const suffix = truncated.truncated
     ? `\n\n… truncated (${truncated.total} chars, showing first ${truncated.text.length}).`
     : "";
-  if (truncated.text.length > MARKDOWN_PARSE_LIMIT) {
+  // NB: hasPathologicalLines also triggers on long data-URI image lines
+  // (e.g. ![chart](data:image/png;base64,...)), which skips htmlEscapeRenderer.image
+  // and renders them as raw text instead of <img>. Acceptable for now to avoid
+  // catastrophic backtracking in marked's inline patterns (#36213).
+  if (truncated.text.length > MARKDOWN_PARSE_LIMIT || hasPathologicalLines(truncated.text)) {
     const escaped = escapeHtml(`${truncated.text}${suffix}`);
     const html = `<pre class="code-block">${escaped}</pre>`;
     const sanitized = DOMPurify.sanitize(html, sanitizeOptions);

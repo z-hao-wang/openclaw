@@ -120,4 +120,70 @@ describe("toSanitizedMarkdownHtml", () => {
       warnSpy.mockRestore();
     }
   });
+
+  describe("pathological long-line protection (#36213)", () => {
+    it("renders long single-line JSON as pre instead of markdown", () => {
+      // Simulate minified JSON tool output (single line > 2000 chars)
+      const longJson = `{"type":"res","sessions":[${Array.from({ length: 50 }, (_, i) => `{"key":"agent:${i}","kind":"direct","outputTokens":${i * 100},"model":"claude-sonnet-4-6"}`).join(",")}]}`;
+      expect(longJson.length).toBeGreaterThan(2000);
+
+      const parseSpy = vi.spyOn(marked, "parse");
+      const html = toSanitizedMarkdownHtml(longJson);
+
+      // Should render as escaped pre, NOT pass through marked.parse
+      expect(parseSpy).not.toHaveBeenCalled();
+      expect(html).toContain('<pre class="code-block">');
+      expect(html).toContain('"type"');
+      parseSpy.mockRestore();
+    });
+
+    it("still parses normal markdown with short lines", () => {
+      const md = "Hello **world**\n\nThis is a paragraph.";
+      const html = toSanitizedMarkdownHtml(md);
+      expect(html).toContain("<strong>world</strong>");
+      expect(html).toContain("<p>");
+    });
+
+    it("renders line exactly at 2000 chars as markdown", () => {
+      const line = "a".repeat(2000);
+      const parseSpy = vi.spyOn(marked, "parse");
+      toSanitizedMarkdownHtml(line);
+      expect(parseSpy).toHaveBeenCalled();
+      parseSpy.mockRestore();
+    });
+
+    it("renders line at 2001 chars as pre", () => {
+      const line = "a".repeat(2001);
+      const parseSpy = vi.spyOn(marked, "parse");
+      const html = toSanitizedMarkdownHtml(line);
+      expect(parseSpy).not.toHaveBeenCalled();
+      expect(html).toContain('<pre class="code-block">');
+      parseSpy.mockRestore();
+    });
+
+    it("detects pathological line among short lines", () => {
+      const text = "short line\n" + "x".repeat(2500) + "\nanother short line";
+      const parseSpy = vi.spyOn(marked, "parse");
+      const html = toSanitizedMarkdownHtml(text);
+      expect(parseSpy).not.toHaveBeenCalled();
+      expect(html).toContain('<pre class="code-block">');
+      parseSpy.mockRestore();
+    });
+
+    it("renders malformed JSON with long lines as pre without hanging", () => {
+      // Malformed JSON that isn't valid but has long lines — this is the actual crash case
+      const malformed =
+        '{"status":"running","data":{"items":[' +
+        Array.from({ length: 200 }, (_, i) => `{"id":${i},"value":"${"x".repeat(20)}"}`).join(",") +
+        "...truncated";
+      expect(malformed.length).toBeGreaterThan(2000);
+
+      const start = performance.now();
+      const html = toSanitizedMarkdownHtml(malformed);
+      const elapsed = performance.now() - start;
+
+      expect(elapsed).toBeLessThan(100);
+      expect(html).toContain('<pre class="code-block">');
+    });
+  });
 });
